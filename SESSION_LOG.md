@@ -1,0 +1,1 @@
+# Desktop Timer - セッションログ
