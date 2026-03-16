@@ -13,7 +13,7 @@ import sys
 import ctypes
 
 try:
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageTk
     import pystray
 except ImportError:
     print("pystray / Pillow が必要です。")
@@ -21,7 +21,26 @@ except ImportError:
     sys.exit(1)
 
 
-# --- アイコン生成 ---
+# 透過色（ウィンドウの透明部分に使う）
+TRANSPARENT = '#010101'
+
+# 付箋風カラーテーマ
+THEME = {
+    'bg': '#FFFEF5',           # クリーム色の背景
+    'title': '#D4654A',        # タイトル（テラコッタ）
+    'text': '#4A4A4A',         # 本文テキスト
+    'sub': '#999999',          # サブテキスト
+    'accent': '#D4654A',       # アクセント色
+    'accent_hover': '#B8533B', # アクセントホバー
+    'entry_bg': '#FFF8E8',     # 入力欄背景
+    'entry_border': '#E0D5C0', # 入力欄ボーダー
+    'btn_cancel_bg': '#F0EBE0',# キャンセルボタン
+    'btn_cancel_fg': '#888888',
+    'shadow': '#00000040',     # 影色（RGBA）
+    'notify_time': '#D4654A',  # 通知の時刻色
+}
+
+
 def create_clock_icon(size=64):
     """Pillowで時計アイコンを描画する"""
     img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
@@ -30,13 +49,9 @@ def create_clock_icon(size=64):
     cx, cy = size // 2, size // 2
     r = size // 2 - 4
 
-    # 文字盤（白い円 + 黒い枠線）
-    draw.ellipse(
-        [cx - r, cy - r, cx + r, cy + r],
-        fill='white', outline='black', width=3
-    )
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r],
+                 fill='white', outline='black', width=3)
 
-    # 目盛り（12個の短い線）
     for i in range(12):
         angle = math.radians(i * 30 - 90)
         x1 = cx + int((r - 6) * math.cos(angle))
@@ -45,30 +60,54 @@ def create_clock_icon(size=64):
         y2 = cy + int((r - 2) * math.sin(angle))
         draw.line([x1, y1, x2, y2], fill='black', width=2)
 
-    # 時針（10時方向）
     hour_angle = math.radians(10 * 30 - 90)
     hx = cx + int((r * 0.5) * math.cos(hour_angle))
     hy = cy + int((r * 0.5) * math.sin(hour_angle))
     draw.line([cx, cy, hx, hy], fill='black', width=3)
 
-    # 分針（2時方向）
     min_angle = math.radians(10 * 6 - 90)
     mx = cx + int((r * 0.75) * math.cos(min_angle))
     my = cy + int((r * 0.75) * math.sin(min_angle))
     draw.line([cx, cy, mx, my], fill='black', width=2)
 
-    # 中心の点
     draw.ellipse([cx - 3, cy - 3, cx + 3, cy + 3], fill='black')
+    return img
 
+
+def create_rounded_bg(w, h, radius=20, bg_color='#FFFEF5', border_color='#7BC47F', border_width=4):
+    """角丸 + 太い縁取りの背景画像を生成（透過色で抜く方式）"""
+    r_val = int(bg_color[1:3], 16)
+    g_val = int(bg_color[3:5], 16)
+    b_val = int(bg_color[5:7], 16)
+    br_val = int(border_color[1:3], 16)
+    bg_val = int(border_color[3:5], 16)
+    bb_val = int(border_color[5:7], 16)
+
+    # 透過色 #010101 = (1, 1, 1) で塗りつぶし
+    img = Image.new('RGB', (w, h), (1, 1, 1))
+    draw = ImageDraw.Draw(img)
+
+    # 縁取り（外側の角丸矩形）
+    draw.rounded_rectangle(
+        [0, 0, w - 1, h - 1],
+        radius=radius, fill=(br_val, bg_val, bb_val)
+    )
+
+    # メインカード（内側の角丸矩形）
+    bw = border_width
+    draw.rounded_rectangle(
+        [bw, bw, w - 1 - bw, h - 1 - bw],
+        radius=max(radius - bw, 4), fill=(r_val, g_val, b_val)
+    )
     return img
 
 
 class DesktopTimer:
     def __init__(self):
-        self.target_time = None  # (hh, mm) タプル
+        self.target_time = None
         self.tray_icon = None
-        self._show_dialog_flag = threading.Event()  # ダイアログ表示要求フラグ
-        self._quit_flag = threading.Event()  # 終了要求フラグ
+        self._show_dialog_flag = threading.Event()
+        self._quit_flag = threading.Event()
 
         # 高DPI対応
         try:
@@ -76,104 +115,145 @@ class DesktopTimer:
         except Exception:
             pass
 
-        # tkinterのメインウィンドウ（非表示、イベントループ用）
         self.root = tk.Tk()
         self.root.withdraw()
 
-        # 入力ダイアログを事前作成
+        # 画像参照を保持（GC防止）
+        self._tk_images = []
+
         self._create_dialog()
-
-        # pystrayを別スレッドで起動
         self._start_tray()
-
-        # メインループでフラグをポーリング（200msごと）
         self._poll_flags()
-
-        # 1秒ごとに時刻チェック
         self._check_timer()
-
-        # tkinterメインループ開始
         self.root.mainloop()
 
     def _start_tray(self):
         """タスクトレイアイコンを別スレッドで起動"""
         icon_image = create_clock_icon(64)
-
         menu = pystray.Menu(
             pystray.MenuItem("Set Timer", self._on_tray_click, default=True),
             pystray.MenuItem("Quit", self._on_quit)
         )
-
-        self.tray_icon = pystray.Icon(
-            "desktop_timer",
-            icon_image,
-            "Desktop Timer",
-            menu
-        )
-
+        self.tray_icon = pystray.Icon("desktop_timer", icon_image, "Desktop Timer", menu)
         tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
         tray_thread.start()
 
     def _on_tray_click(self, icon, item):
-        """トレイアイコンクリック → フラグを立てる"""
         self._show_dialog_flag.set()
 
     def _on_quit(self, icon, item):
-        """終了要求フラグを立てる"""
         self._quit_flag.set()
 
     def _poll_flags(self):
-        """フラグをポーリングしてメインスレッドで処理"""
         if self._quit_flag.is_set():
             self._quit_flag.clear()
             if self.tray_icon:
                 self.tray_icon.stop()
             self.root.destroy()
             return
-
         if self._show_dialog_flag.is_set():
             self._show_dialog_flag.clear()
             self._show_input_dialog()
-
         self.root.after(200, self._poll_flags)
 
+    def _setup_floating_window(self, window, content_w, content_h, bg_color=None):
+        """フローティングウィンドウに角丸+影の背景を設定"""
+        if bg_color is None:
+            bg_color = THEME['bg']
+
+        bg_img = create_rounded_bg(content_w, content_h, bg_color=bg_color)
+
+        window.overrideredirect(True)
+        window.attributes('-topmost', True)
+        window.configure(bg=TRANSPARENT)
+        window.attributes('-transparentcolor', TRANSPARENT)
+
+        # 画面中央
+        sw = window.winfo_screenwidth()
+        sh = window.winfo_screenheight()
+        x = (sw - content_w) // 2
+        y = (sh - content_h) // 2
+        window.geometry(f"{content_w}x{content_h}+{x}+{y}")
+
+        # 背景画像をCanvasに描画
+        tk_img = ImageTk.PhotoImage(bg_img)
+        self._tk_images.append(tk_img)
+
+        canvas = tk.Canvas(window, width=content_w, height=content_h,
+                           bg=TRANSPARENT, highlightthickness=0)
+        canvas.pack()
+        canvas.create_image(0, 0, anchor='nw', image=tk_img)
+
+        # コンテンツ用フレーム（中央に配置）
+        frame = tk.Frame(canvas, bg=bg_color)
+        canvas.create_window(content_w // 2, content_h // 2, anchor='center', window=frame)
+
+        return frame
+
     def _create_dialog(self):
-        """入力ダイアログを事前に作成（表示/非表示で再利用）"""
+        """入力ダイアログを事前作成"""
         self.dialog = tk.Toplevel(self.root)
-        self.dialog.title("Timer")
-        self.dialog.attributes('-topmost', True)
-        self.dialog.resizable(False, False)
+        bg = THEME['bg']
 
-        # 画面中央に配置
-        sw = self.dialog.winfo_screenwidth()
-        sh = self.dialog.winfo_screenheight()
-        x = (sw - 300) // 2
-        y = (sh - 150) // 2
-        self.dialog.geometry(f"300x150+{x}+{y}")
+        frame = self._setup_floating_window(self.dialog, 400, 340, bg)
 
-        tk.Label(self.dialog, text="4桁で時刻を入力 (例: 1430)", font=("Arial", 11)).pack(pady=(15, 5))
+        # タイトル
+        tk.Label(
+            frame, text="Set Timer",
+            font=("Segoe UI", 22, "bold"),
+            bg=bg, fg=THEME['title']
+        ).pack(pady=(10, 3))
 
-        self.entry = tk.Entry(self.dialog, font=("Arial", 28), justify='center', width=6)
-        self.entry.pack(pady=5)
+        # 説明
+        tk.Label(
+            frame, text="4桁で時刻を入力 (例: 1430)",
+            font=("Segoe UI", 10),
+            bg=bg, fg=THEME['sub']
+        ).pack(pady=(0, 10))
 
-        self.status_label = tk.Label(self.dialog, text="", font=("Arial", 9), fg="red")
-        self.status_label.pack()
+        # 入力欄
+        entry_frame = tk.Frame(frame, bg=THEME['entry_border'], padx=2, pady=2)
+        entry_frame.pack(pady=5)
+        self.entry = tk.Entry(
+            entry_frame, font=("Segoe UI", 30), justify='center', width=6,
+            bg=THEME['entry_bg'], fg=THEME['text'], insertbackground=THEME['text'],
+            relief='flat'
+        )
+        self.entry.pack(ipady=4)
 
-        btn_frame = tk.Frame(self.dialog)
-        btn_frame.pack(pady=5)
-        tk.Button(btn_frame, text="OK", font=("Arial", 10), width=8, command=self._on_submit).pack(side='left', padx=5)
-        tk.Button(btn_frame, text="Cancel", font=("Arial", 10), width=8, command=self._hide_dialog).pack(side='left', padx=5)
+        # エラー表示
+        self.status_label = tk.Label(
+            frame, text="", font=("Segoe UI", 9),
+            fg=THEME['accent'], bg=bg
+        )
+        self.status_label.pack(pady=(3, 8))
+
+        # ボタン
+        btn_frame = tk.Frame(frame, bg=bg)
+        btn_frame.pack(pady=(0, 10))
+
+        tk.Button(
+            btn_frame, text="SET", font=("Segoe UI", 11, "bold"), width=10,
+            command=self._on_submit,
+            bg=THEME['accent'], fg='#FFFFFF', activebackground=THEME['accent_hover'],
+            relief='flat', cursor='hand2'
+        ).pack(side='left', padx=6, ipady=4)
+
+        tk.Button(
+            btn_frame, text="Cancel", font=("Segoe UI", 11), width=10,
+            command=self._hide_dialog,
+            bg=THEME['btn_cancel_bg'], fg=THEME['btn_cancel_fg'],
+            activebackground='#E5E0D5',
+            relief='flat', cursor='hand2'
+        ).pack(side='left', padx=6, ipady=4)
 
         self.entry.bind('<Return>', lambda e: self._on_submit())
         self.dialog.bind('<Return>', lambda e: self._on_submit())
         self.dialog.bind('<Escape>', lambda e: self._hide_dialog())
-        self.dialog.protocol("WM_DELETE_WINDOW", self._hide_dialog)
 
-        # 最初は非表示
         self.dialog.withdraw()
 
     def _show_input_dialog(self):
-        """ダイアログを表示"""
         self.entry.delete(0, tk.END)
         self.status_label.config(text="")
         self.dialog.deiconify()
@@ -182,11 +262,9 @@ class DesktopTimer:
         self.dialog.after(100, self.entry.focus_force)
 
     def _hide_dialog(self):
-        """ダイアログを非表示"""
         self.dialog.withdraw()
 
     def _on_submit(self):
-        """入力値を処理"""
         text = self.entry.get().strip()
         if len(text) == 4 and text.isdigit():
             hh = int(text[:2])
@@ -202,68 +280,49 @@ class DesktopTimer:
         self.entry.select_range(0, tk.END)
 
     def _show_confirmation(self, hh, mm):
-        """セット完了を5秒間、画面中央におしゃれに表示"""
+        """セット完了を3秒間表示"""
         popup = tk.Toplevel(self.root)
-        popup.overrideredirect(True)  # タイトルバーなし
-        popup.attributes('-topmost', True)
-        popup.configure(bg='#1A1A2E')
+        bg = THEME['bg']
+        frame = self._setup_floating_window(popup, 450, 240, bg)
 
-        w, h = 500, 240
-
-        # メインフレーム（角丸風にpadding付き）
-        frame = tk.Frame(popup, bg='#1A1A2E', padx=30, pady=20)
-        frame.pack(expand=True, fill='both')
-
-        # 時刻表示（大きく）
+        # 時刻
         tk.Label(
-            frame,
-            text=f"{hh:02d}:{mm:02d}",
-            font=("Segoe UI", 48, "bold"),
-            bg='#1A1A2E', fg='#E94560'
-        ).pack()
+            frame, text=f"{hh:02d}:{mm:02d}",
+            font=("Segoe UI", 44, "bold"),
+            bg=bg, fg=THEME['notify_time']
+        ).pack(pady=(10, 0))
 
-        # セットしましたメッセージ
+        # メッセージ
         tk.Label(
-            frame,
-            text="にセットしました",
-            font=("Segoe UI", 14),
-            bg='#1A1A2E', fg='#EEEEEE'
+            frame, text="にセットしました",
+            font=("Segoe UI", 13),
+            bg=bg, fg=THEME['text']
         ).pack(pady=(0, 5))
 
-        # プログレスバー風の装飾ライン
-        canvas = tk.Canvas(frame, height=3, bg='#1A1A2E', highlightthickness=0)
-        canvas.pack(fill='x', pady=(5, 0))
-        bar = canvas.create_rectangle(0, 0, 0, 3, fill='#E94560', outline='')
+        # プログレスバー
+        bar_canvas = tk.Canvas(frame, height=4, bg=bg, highlightthickness=0)
+        bar_canvas.pack(fill='x', padx=20, pady=(8, 0))
+        bar_w = 340
+        bar = bar_canvas.create_rectangle(0, 0, bar_w, 4, fill=THEME['accent'], outline='')
 
-        # 画面中央に配置
-        popup.update_idletasks()
-        sw = popup.winfo_screenwidth()
-        sh = popup.winfo_screenheight()
-        x = (sw - w) // 2
-        y = (sh - h) // 2
-        popup.geometry(f"{w}x{h}+{x}+{y}")
-
-        # プログレスバーアニメーション（5秒かけて縮む）
-        total_ms = 3000
+        # アニメーション
+        total_ms = 1000
         step_ms = 50
         steps = total_ms // step_ms
         current = [0]
 
-        def animate_bar():
+        def animate():
             current[0] += 1
             if current[0] >= steps or not popup.winfo_exists():
                 popup.destroy()
                 return
             ratio = 1.0 - (current[0] / steps)
-            canvas.coords(bar, 0, 0, int(360 * ratio), 3)
-            popup.after(step_ms, animate_bar)
+            bar_canvas.coords(bar, 0, 0, int(bar_w * ratio), 4)
+            popup.after(step_ms, animate)
 
-        # 初期バー描画
-        popup.after(10, lambda: canvas.coords(bar, 0, 0, 360, 3))
-        popup.after(step_ms, animate_bar)
+        popup.after(step_ms, animate)
 
     def _check_timer(self):
-        """1秒ごとに時刻チェック（メインスレッドで実行）"""
         if self.target_time:
             now = time.localtime()
             if now.tm_hour == self.target_time[0] and now.tm_min == self.target_time[1]:
@@ -271,85 +330,64 @@ class DesktopTimer:
         self.root.after(1000, self._check_timer)
 
     def _show_notification(self):
-        """点滅する通知ウィンドウを最前面に表示"""
+        """時刻到達通知"""
         hh, mm = self.target_time
-        self.target_time = None  # 通知は1回だけ
+        self.target_time = None
 
         if self.tray_icon:
             self.tray_icon.title = "Desktop Timer"
 
         notify = tk.Toplevel(self.root)
-        notify.title("Timer")
-        notify.attributes('-topmost', True)
-        notify.resizable(False, False)
+        bg = THEME['bg']
+        frame = self._setup_floating_window(notify, 500, 300, bg)
 
-        # 大きめサイズ、画面中央
-        w, h = 500, 260
-        sw = notify.winfo_screenwidth()
-        sh = notify.winfo_screenheight()
-        x = (sw - w) // 2
-        y = (sh - h) // 2
-        notify.geometry(f"{w}x{h}+{x}+{y}")
-        notify.configure(bg='#1A1A2E')
-
-        # 時刻表示（大きく）
+        # 時刻
         time_label = tk.Label(
-            notify,
-            text=f"{hh:02d}:{mm:02d}",
+            frame, text=f"{hh:02d}:{mm:02d}",
             font=("Segoe UI", 52, "bold"),
-            bg='#1A1A2E', fg='#E94560'
+            bg=bg, fg=THEME['notify_time']
         )
-        time_label.pack(pady=(30, 0))
+        time_label.pack(pady=(15, 0))
 
         # メッセージ
-        label = tk.Label(
-            notify,
-            text="Time's up!",
+        msg_label = tk.Label(
+            frame, text="Time's up!",
             font=("Segoe UI", 18),
-            bg='#1A1A2E', fg='#EEEEEE'
+            bg=bg, fg=THEME['text']
         )
-        label.pack(pady=(5, 10))
+        msg_label.pack(pady=(5, 15))
 
-        # OKボタン
         def close_notify():
             notify.destroy()
 
-        close_btn = tk.Button(
-            notify, text="OK", font=("Segoe UI", 12),
-            width=12, command=close_notify,
-            bg='#E94560', fg='#FFFFFF', activebackground='#C73E54',
+        tk.Button(
+            frame, text="OK", font=("Segoe UI", 12, "bold"), width=14,
+            command=close_notify,
+            bg=THEME['accent'], fg='#FFFFFF', activebackground=THEME['accent_hover'],
             relief='flat', cursor='hand2'
-        )
-        close_btn.pack(pady=(5, 20))
+        ).pack(ipady=4)
 
-        # 穏やかな点滅（暗めの色同士でふわっと切り替え）
+        # 穏やかな点滅（文字色のみ切り替え）
         blink_state = [0]
-        colors_bg = ['#1A1A2E', '#16213E']
+        colors = [THEME['notify_time'], THEME['sub']]
 
         def blink():
             if not notify.winfo_exists():
                 return
-            i = blink_state[0] % 2
-            bg = colors_bg[i]
-            notify.configure(bg=bg)
-            time_label.configure(bg=bg)
-            label.configure(bg=bg)
+            time_label.configure(fg=colors[blink_state[0] % 2])
             blink_state[0] += 1
             notify.after(800, blink)
 
         blink()
-
-        notify.protocol("WM_DELETE_WINDOW", close_notify)
         notify.focus_force()
 
 
 def ensure_single_instance():
-    """Windowsミューテックスで多重起動を防止"""
     mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "DesktopTimer_SingleInstance")
-    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+    if ctypes.windll.kernel32.GetLastError() == 183:
         ctypes.windll.kernel32.CloseHandle(mutex)
         sys.exit(0)
-    return mutex  # 参照を保持してGC防止
+    return mutex
 
 
 if __name__ == '__main__':

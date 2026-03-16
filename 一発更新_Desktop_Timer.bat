@@ -2,11 +2,19 @@
 chcp 65001 >nul 2>&1
 set PYTHONUTF8=1
 
+REM --- Check Python 3.14 ---
+py -3.14 --version >nul 2>&1
+if errorlevel 1 (
+    echo Python 3.14 not found. Please install Python 3.14.
+    pause
+    exit /b 1
+)
+
 REM --- Install dependencies ---
 echo [1/3] Installing dependencies...
 py -3.14 -m pip install pystray Pillow --quiet
 if errorlevel 1 (
-    echo ERROR: pip install failed. Python 3.14 is required.
+    echo ERROR: pip install failed.
     pause
     exit /b 1
 )
@@ -19,11 +27,11 @@ set "STARTUP_DIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 set "SHORTCUT_PATH=%STARTUP_DIR%\Desktop_Timer.lnk"
 
 powershell -NoProfile -Command ^
-  "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('%SHORTCUT_PATH%'); $sc.TargetPath = '%VBS_PATH%'; $sc.WorkingDirectory = '%SCRIPT_DIR%'; $sc.Description = 'Desktop Timer'; $sc.Save()"
+  "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut([Environment]::GetFolderPath('Startup') + '\Desktop_Timer.lnk'); $sc.TargetPath = '%VBS_PATH%'; $sc.WorkingDirectory = '%SCRIPT_DIR%'; $sc.Description = 'Desktop Timer'; $sc.Save()"
 
 REM --- Kill existing instance and launch ---
 echo [3/3] Launching Desktop Timer...
-taskkill /F /IM python.exe /FI "WINDOWTITLE eq timer.py" >nul 2>&1
+powershell -NoProfile -Command "Get-Process python -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*timer.py*' } | Stop-Process -Force" >nul 2>&1
 timeout /t 1 /nobreak >nul
 start "" wscript "%VBS_PATH%"
 
