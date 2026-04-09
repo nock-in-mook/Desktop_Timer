@@ -5,12 +5,34 @@
 - 指定時刻に点滅通知
 """
 
+import os
+import sys
+
+# Pythonバージョンチェック（3.14以外で起動されるとTcl競合が起きるので即終了）
+if sys.version_info[:2] != (3, 14):
+    sys.stderr.write(f"ERROR: Python 3.14 で実行してください (現在: {sys.version})\n")
+    sys.exit(1)
+
+# Tcl/Tkバージョン競合を防ぐ（Python 3.10のTclが誤って読まれる問題の対策）
+_python_dir = os.path.dirname(sys.executable)
+os.environ['TCL_LIBRARY'] = os.path.join(_python_dir, 'tcl', 'tcl8.6')
+os.environ['TK_LIBRARY'] = os.path.join(_python_dir, 'tcl', 'tk8.6')
+
 import tkinter as tk
 import threading
 import time
 import math
-import sys
 import ctypes
+import logging
+from logging.handlers import RotatingFileHandler
+
+# クラッシュログ設定（同じフォルダにログ出力、1MBでローテート、3世代保存）
+_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'timer_error.log')
+_log_handler = RotatingFileHandler(
+    _log_path, maxBytes=1024 * 1024, backupCount=3, encoding='utf-8'
+)
+_log_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s'))
+logging.basicConfig(level=logging.ERROR, handlers=[_log_handler])
 
 try:
     from PIL import Image, ImageDraw, ImageTk
@@ -145,16 +167,23 @@ class DesktopTimer:
         self._quit_flag.set()
 
     def _poll_flags(self):
-        if self._quit_flag.is_set():
-            self._quit_flag.clear()
-            if self.tray_icon:
-                self.tray_icon.stop()
-            self.root.destroy()
-            return
-        if self._show_dialog_flag.is_set():
-            self._show_dialog_flag.clear()
-            self._show_input_dialog()
-        self.root.after(200, self._poll_flags)
+        try:
+            if self._quit_flag.is_set():
+                self._quit_flag.clear()
+                if self.tray_icon:
+                    self.tray_icon.stop()
+                self.root.destroy()
+                return
+            if self._show_dialog_flag.is_set():
+                self._show_dialog_flag.clear()
+                self._show_input_dialog()
+        except Exception as e:
+            logging.error(f"_poll_flags エラー: {e}", exc_info=True)
+        finally:
+            try:
+                self.root.after(200, self._poll_flags)
+            except Exception:
+                pass
 
     def _setup_floating_window(self, window, content_w, content_h, bg_color=None):
         """フローティングウィンドウに角丸+影の背景を設定"""
@@ -323,11 +352,18 @@ class DesktopTimer:
         popup.after(step_ms, animate)
 
     def _check_timer(self):
-        if self.target_time:
-            now = time.localtime()
-            if now.tm_hour == self.target_time[0] and now.tm_min == self.target_time[1]:
-                self._show_notification()
-        self.root.after(1000, self._check_timer)
+        try:
+            if self.target_time:
+                now = time.localtime()
+                if now.tm_hour == self.target_time[0] and now.tm_min == self.target_time[1]:
+                    self._show_notification()
+        except Exception as e:
+            logging.error(f"_check_timer エラー: {e}", exc_info=True)
+        finally:
+            try:
+                self.root.after(1000, self._check_timer)
+            except Exception:
+                pass
 
     def _show_notification(self):
         """時刻到達通知"""
@@ -392,4 +428,7 @@ def ensure_single_instance():
 
 if __name__ == '__main__':
     _mutex = ensure_single_instance()
-    DesktopTimer()
+    try:
+        DesktopTimer()
+    except Exception as e:
+        logging.error(f"致命的エラーでタイマーが終了: {e}", exc_info=True)

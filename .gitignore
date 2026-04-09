@@ -1,0 +1,6 @@
+timer_error.log
+timer_error.log.*
+watchdog.log
+watchdog.log.*
+__pycache__/
+*.pyc
