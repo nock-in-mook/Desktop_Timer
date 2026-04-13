@@ -19,6 +19,7 @@
 - 透過色は #010101 を使用（UI上使わない色）
 - 角丸背景はPillowで画像生成して-transparentcolorで透過
 - VBSの`WshShell.Run`を`bWaitOnReturn=True`にするとpythonwがなぜか起動しない問題あり → fire-and-forgetで使うこと
+- **スタートアップ起動**: .lnkショートカットに日本語パス（Googleドライブ）を入れると化ける → `~/.desktop_timer_launcher.py` を中継して日本語パスを回避
 
 ## 堅牢化（2026-04-09追加）
 - watchdog.py: timer.pyを起動して終了したら5秒後に自動再起動
